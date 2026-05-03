@@ -3,6 +3,8 @@ dotenv.config();
 
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
+import { Pinecone } from '@pinecone-database/pinecone';
+import { PineconeStore } from '@langchain/pinecone';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 class GeminiEmbeddings {
@@ -11,33 +13,61 @@ class GeminiEmbeddings {
         this.model = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
     }
 
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async embedDocuments(texts) {
+        const results = [];
+        const BATCH_SIZE = 50;
+
+        for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+            const batch = texts.slice(i, i + BATCH_SIZE);
+            console.log(`Embedding batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(texts.length/BATCH_SIZE)}...`);
+
+            const batchResults = await Promise.all(
+                batch.map(t => this.embedQuery(t))
+            );
+            results.push(...batchResults);
+
+            if (i + BATCH_SIZE < texts.length) {
+                console.log("⏳ Waiting 65s for rate limit...");
+                await this.sleep(65000);
+            }
+        }
+        return results;
+    }
+
     async embedQuery(text) {
         const result = await this.model.embedContent(text);
         return result.embedding.values;
     }
 }
 
-async function loadAndChunkAndEmbed() {
-    // Load PDF
+async function indexDocument() {
     const pdfLoader = new PDFLoader('./dsa.pdf');
     const rawDocs = await pdfLoader.load();
     console.log("✅ PDF loaded successfully");
-    console.log(`📄 Total pages loaded: ${rawDocs.length}`);
 
-    // Chunk
     const textSplitter = new RecursiveCharacterTextSplitter({
         chunkSize: 1000,
         chunkOverlap: 200,
     });
     const chunkedDocs = await textSplitter.splitDocuments(rawDocs);
     console.log("✅ Chunking Completed");
-    console.log(`🔢 Total chunks created: ${chunkedDocs.length}`);
 
-    // Embed first chunk just to test
     const embeddings = new GeminiEmbeddings(process.env.GEMINI_API_KEY);
-    const testEmbedding = await embeddings.embedQuery(chunkedDocs[0].pageContent);
-    console.log("✅ Embedding working!");
-    console.log(`📐 Embedding dimension: ${testEmbedding.length}`);
+    console.log("✅ Embedding model configured");
+
+    const pinecone = new Pinecone();
+    const pineconeIndex = pinecone.Index(process.env.PINECONE_INDEX_NAME);
+    console.log("✅ Pinecone configured");
+
+    await PineconeStore.fromDocuments(chunkedDocs, embeddings, {
+        pineconeIndex,
+        maxConcurrency: 5,
+    });
+    console.log("✅ Data Stored in Pinecone successfully!");
 }
 
-loadAndChunkAndEmbed();
+indexDocument();
